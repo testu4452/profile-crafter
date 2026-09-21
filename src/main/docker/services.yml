@@ -1,0 +1,14 @@
+# This configuration is intended for development purpose, it's **your** responsibility to harden it for production
+name: profilecrafter
+services:
+  postgresql:
+    extends:
+      file: ./postgresql.yml
+      service: postgresql
+    profiles:
+      - ''
+      - prod
+  kafka:
+    extends:
+      file: ./kafka.yml
+      service: kafka

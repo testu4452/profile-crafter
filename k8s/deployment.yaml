@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-crafter
+  labels:
+    app: profile-crafter
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: profile-crafter
+  template:
+    metadata:
+      labels:
+        app: profile-crafter
+    spec:
+      containers:
+        - name: profile-crafter
+          image: your-dockerhub-username/profile-crafter:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

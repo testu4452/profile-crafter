@@ -1,108 +1,176 @@
 pipeline {
-  agent any
+    agent any
 
-  environment {
-    APP_NAME = 'profile-crafter'
-    IMAGE_REPO = "${env.DOCKERHUB_REPO ?: 'your-dockerhub-username/profile-crafter'}"
-    IMAGE_TAG = "${env.BUILD_NUMBER}"
-    K8S_NAMESPACE = "${env.K8S_NAMESPACE ?: 'default'}"
-    KUBECONFIG_CRED = "${env.KUBECONFIG_CRED ?: 'kubeconfig'}"
-  }
+    environment {
+        TARGET_HOST = '10.73.76.154'
+        TARGET_USER = 'stryker'
+        SSH_PASS    = 'GslabGavs@4231'
 
-  options {
-    timestamps()
-    ansiColor('xterm')
-  }
+        REPO_URL    = 'https://github.com/testu4452/profile-crafter.git'
+        REPO_BRANCH = 'main'
 
-  stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
+        APP_DIR     = '/tmp/profile_k8s'
+
+        IMAGE_NAME  = '10.73.76.154:5000/profile-app'
+        IMAGE_TAG   = "${BUILD_NUMBER}"
     }
 
-    stage('Detect Build Tool') {
-      steps {
-        script {
-          if (fileExists('pom.xml')) {
-            env.BUILD_TOOL = 'maven'
-          } else if (fileExists('build.gradle') || fileExists('build.gradle.kts')) {
-            env.BUILD_TOOL = 'gradle'
-          } else if (fileExists('package.json')) {
-            env.BUILD_TOOL = 'npm'
-          } else {
-            error 'No supported build descriptor found (pom.xml, build.gradle, package.json)'
-          }
-          echo "Detected build tool: ${env.BUILD_TOOL}"
+    options {
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    rm -rf ${APP_DIR}
+                    git clone -b ${REPO_BRANCH} ${REPO_URL} ${APP_DIR}
+                    echo "Repository cloned successfully"
+                '
+                """
+            }
         }
-      }
-    }
 
-    stage('Build') {
-      steps {
-        script {
-          if (env.BUILD_TOOL == 'maven') {
-            sh 'mvn -B clean package -DskipTests'
-          } else if (env.BUILD_TOOL == 'gradle') {
-            sh './gradlew clean build -x test || gradle clean build -x test'
-          } else if (env.BUILD_TOOL == 'npm') {
-            sh 'npm ci || npm install'
-            sh 'npm run build --if-present'
-          }
+        stage('Verify Environment') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    java -version
+                    javac -version
+                    docker --version
+                    kubectl version --client || true
+                '
+                """
+            }
         }
-      }
-    }
 
-    stage('Build Docker Image') {
-      steps {
-        sh '''#!/bin/bash -e
-          docker build -t ${IMAGE_REPO}:${IMAGE_TAG} .
-          docker tag ${IMAGE_REPO}:${IMAGE_TAG} ${IMAGE_REPO}:latest
-        '''
-      }
-    }
+        stage('Build Application') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    cd ${APP_DIR}
 
-    stage('Push Docker Image') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-creds', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
-          sh '''#!/bin/bash -e
-            echo "${DOCKER_PASS}" | docker login -u "${DOCKER_USER}" --password-stdin
-            docker push ${IMAGE_REPO}:${IMAGE_TAG}
-            docker push ${IMAGE_REPO}:latest
-            docker logout
-          '''
+                    if [ -f gradlew ]; then
+                        chmod +x gradlew
+                        ./gradlew clean bootJar -x test -x compileTestJava
+                    elif [ -f pom.xml ]; then
+                        mvn clean package -DskipTests
+                    else
+                        echo "No supported build tool found"
+                        exit 1
+                    fi
+                '
+                """
+            }
         }
-      }
-    }
 
-    stage('Deploy to Kubernetes') {
-      steps {
-        withCredentials([file(credentialsId: "${KUBECONFIG_CRED}", variable: 'KCFG')]) {
-          sh '''#!/bin/bash -e
-            export KUBECONFIG=${KCFG}
-            kubectl apply -f k8s/namespace.yaml || true
-            kubectl apply -f k8s/deployment.yaml -n ${K8S_NAMESPACE}
-            kubectl apply -f k8s/service.yaml -n ${K8S_NAMESPACE}
-            if [ -f k8s/ingress.yaml ]; then
-              kubectl apply -f k8s/ingress.yaml -n ${K8S_NAMESPACE}
-            fi
-            kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_REPO}:${IMAGE_TAG} -n ${K8S_NAMESPACE}
-            kubectl rollout status deployment/${APP_NAME} -n ${K8S_NAMESPACE} --timeout=180s
-          '''
+        stage('Locate Jar') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    cd ${APP_DIR}
+                    echo "Generated JAR files:"
+                    find build/libs -name "*.jar"
+                '
+                """
+            }
         }
-      }
-    }
-  }
 
-  post {
-    always {
-      archiveArtifacts artifacts: '**/target/*.jar, **/build/libs/*.jar, **/dist/**', allowEmptyArchive: true
+        stage('Build Docker Image') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    cd ${APP_DIR}
+
+                    docker build \
+                        -t ${IMAGE_NAME}:${IMAGE_TAG} \
+                        -t ${IMAGE_NAME}:latest .
+                '
+                """
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                    docker push ${IMAGE_NAME}:latest
+
+                    echo "Registry Images:"
+                    curl -s http://localhost:5000/v2/_catalog || true
+                '
+                """
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh """
+                sshpass -p '${SSH_PASS}' ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} '
+                    cd ${APP_DIR}
+
+                    cat > deployment.yaml <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: profile-app
+  template:
+    metadata:
+      labels:
+        app: profile-app
+    spec:
+      containers:
+      - name: profile-app
+        image: ${IMAGE_NAME}:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: profile-app-service
+spec:
+  selector:
+    app: profile-app
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: NodePort
+EOF
+
+                    kubectl apply -f deployment.yaml
+
+                    kubectl rollout status deployment/profile-app --timeout=300s
+
+                    kubectl get pods
+                    kubectl get svc
+                '
+                """
+            }
+        }
     }
-    success {
-      echo 'Pipeline completed successfully.'
+
+    post {
+        success {
+            echo '✅ Pipeline completed successfully.'
+        }
+
+        failure {
+            echo '❌ Pipeline failed.'
+        }
+
+        always {
+            cleanWs(deleteDirs: true)
+        }
     }
-    failure {
-      echo 'Pipeline failed.'
-    }
-  }
 }
